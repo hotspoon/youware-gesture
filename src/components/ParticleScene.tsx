@@ -13,6 +13,12 @@ const Particles = () => {
 
   const effectivePattern = isFingerHeart ? ("heart" as const) : particlePattern;
 
+  // NEW: force remount geometry when pattern changes
+  const geometryKey = useMemo(
+    () => `pattern:${effectivePattern}`,
+    [effectivePattern],
+  );
+
   // Generate positions based on pattern
   const positions = useMemo(() => {
     const pos = new Float32Array(PARTICLE_COUNT * 3);
@@ -168,8 +174,8 @@ const Particles = () => {
   `;
 
   return (
-    <points ref={pointsRef}>
-      <bufferGeometry>
+    <points ref={pointsRef} key={geometryKey}>
+      <bufferGeometry key={geometryKey}>
         <bufferAttribute
           attach="attributes-position"
           count={positions.length / 3}
