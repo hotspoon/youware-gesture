@@ -2,11 +2,38 @@ import { useEffect, useRef, useState } from "react";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
 import { useAppStore } from "../store/useAppStore";
 
+type Landmark = { x: number; y: number; z: number };
+
+const dist3 = (a: Landmark, b: Landmark) =>
+  Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2);
+
+// Finger "extended" heuristic: tip farther from wrist than PIP (works decently cross-orientation)
+const isFingerExtended = (
+  landmarks: Landmark[],
+  tipIndex: number,
+  pipIndex: number,
+  wristIndex = 0,
+  epsilon = 0.015,
+) => {
+  const wrist = landmarks[wristIndex];
+  const tip = landmarks[tipIndex];
+  const pip = landmarks[pipIndex];
+  return dist3(wrist, tip) > dist3(wrist, pip) + epsilon;
+};
+
 export const HandTracker = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isLoaded, setIsLoaded] = useState(false);
-  const setHandOpenness = useAppStore((state) => state.setHandOpenness);
+
+  const setHandOpenness = useAppStore((s) => s.setHandOpenness);
+  const setIsFingerHeart = useAppStore((s) => s.setIsFingerHeart);
+  const setIsVSign = useAppStore((s) => s.setIsVSign);
+
   const requestRef = useRef<number>();
+
+  // small debouncers to reduce flicker
+  const heartDebounceRef = useRef({ last: false, frames: 0 });
+  const vDebounceRef = useRef({ last: false, frames: 0 });
 
   useEffect(() => {
     let handLandmarker: HandLandmarker | null = null;
@@ -18,7 +45,8 @@ export const HandTracker = () => {
         );
         handLandmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
-            modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
             delegate: "GPU",
           },
           runningMode: "VIDEO",
@@ -63,53 +91,65 @@ export const HandTracker = () => {
       const results = landmarker.detectForVideo(videoRef.current, startTimeMs);
 
       if (results.landmarks && results.landmarks.length > 0) {
-        const landmarks = results.landmarks[0];
+        const landmarks = results.landmarks[0] as Landmark[];
 
-        // Calculate openness
-        // Wrist: 0
-        // Tips: 4 (Thumb), 8 (Index), 12 (Middle), 16 (Ring), 20 (Pinky)
-        // MCPs (Knuckles): 1, 5, 9, 13, 17
-
-        // We'll use the distance from the wrist (0) to the tips.
-        // To normalize, we divide by the size of the palm (distance from 0 to 9).
-
+        // --- openness (existing) ---
         const wrist = landmarks[0];
-        const palmSize = Math.sqrt(
-          Math.pow(landmarks[9].x - wrist.x, 2) +
-            Math.pow(landmarks[9].y - wrist.y, 2) +
-            Math.pow(landmarks[9].z - wrist.z, 2),
-        );
+        const palmSize = dist3(landmarks[9], wrist);
 
         const tips = [4, 8, 12, 16, 20];
         let totalTipDistance = 0;
 
         tips.forEach((tipIndex) => {
-          const tip = landmarks[tipIndex];
-          const dist = Math.sqrt(
-            Math.pow(tip.x - wrist.x, 2) +
-              Math.pow(tip.y - wrist.y, 2) +
-              Math.pow(tip.z - wrist.z, 2),
-          );
-          totalTipDistance += dist;
+          totalTipDistance += dist3(landmarks[tipIndex], wrist);
         });
 
         const avgTipDistance = totalTipDistance / 5;
-
-        // Heuristic:
-        // Closed fist: avgTipDistance is roughly equal to palmSize (or less for thumb)
-        // Open hand: avgTipDistance is roughly 2x palmSize or more
-
         const ratio = avgTipDistance / palmSize;
 
-        // Map ratio to 0-1 range
-        // Observed range: ~0.8 (closed) to ~2.2 (open)
         const minRatio = 0.9;
         const maxRatio = 2.0;
 
         let openness = (ratio - minRatio) / (maxRatio - minRatio);
         openness = Math.max(0, Math.min(1, openness));
-
         setHandOpenness(openness);
+
+        // --- NEW: gesture detection ---
+        const indexExtended = isFingerExtended(landmarks, 8, 6);
+        const middleExtended = isFingerExtended(landmarks, 12, 10);
+        const ringExtended = isFingerExtended(landmarks, 16, 14);
+        const pinkyExtended = isFingerExtended(landmarks, 20, 18);
+
+        // V sign: index + middle up; ring + pinky down (thumb ignored)
+        const vNow = indexExtended && middleExtended && !ringExtended && !pinkyExtended;
+
+        // Finger heart: thumb tip close to index tip; other fingers mostly down
+        const thumbTip = landmarks[4];
+        const indexTip = landmarks[8];
+        const thumbIndexNorm = dist3(thumbTip, indexTip) / palmSize;
+
+        const heartNow =
+          thumbIndexNorm < 0.35 && // tune if needed
+          !middleExtended &&
+          !ringExtended &&
+          !pinkyExtended;
+
+        // debounce ~3 frames
+        const hd = heartDebounceRef.current;
+        if (heartNow === hd.last) hd.frames++;
+        else {
+          hd.last = heartNow;
+          hd.frames = 1;
+        }
+        if (hd.frames === 3) setIsFingerHeart(heartNow);
+
+        const vd = vDebounceRef.current;
+        if (vNow === vd.last) vd.frames++;
+        else {
+          vd.last = vNow;
+          vd.frames = 1;
+        }
+        if (vd.frames === 3) setIsVSign(vNow);
       }
     }
 
@@ -117,7 +157,7 @@ export const HandTracker = () => {
   };
 
   return (
-    <div className="fixed bottom-4 right-4 w-32 h-24 bg-black/50 rounded-lg overflow-hidden border border-white/20 z-50">
+    <div className="fixed z-50 w-32 h-24 overflow-hidden border rounded-lg bottom-4 right-4 bg-black/50 border-white/20">
       {!isLoaded && (
         <div className="absolute inset-0 flex items-center justify-center text-xs text-white">
           Loading AI...
@@ -128,7 +168,7 @@ export const HandTracker = () => {
         autoPlay
         playsInline
         muted
-        className="w-full h-full object-cover opacity-80"
+        className="object-cover w-full h-full opacity-80"
       />
     </div>
   );

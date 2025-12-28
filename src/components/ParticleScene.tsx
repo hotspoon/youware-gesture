@@ -8,7 +8,10 @@ const PARTICLE_COUNT = 15000;
 
 const Particles = () => {
   const pointsRef = useRef<THREE.Points>(null);
-  const { handOpenness, particleColor, particlePattern } = useAppStore();
+  const { handOpenness, particleColor, particlePattern, isFingerHeart } =
+    useAppStore();
+
+  const effectivePattern = isFingerHeart ? ("heart" as const) : particlePattern;
 
   // Generate positions based on pattern
   const positions = useMemo(() => {
@@ -19,10 +22,27 @@ const Particles = () => {
         y = 0,
         z = 0;
 
-      if (particlePattern === "sphere") {
+      if (effectivePattern === "heart") {
+        // 2D heart curve -> extrude thickness in Z
+        // x = 16 sin^3(t)
+        // y = 13 cos(t) - 5 cos(2t) - 2 cos(3t) - cos(4t)
+        const t = Math.random() * Math.PI * 2;
+
+        const hx = 16 * Math.pow(Math.sin(t), 3);
+        const hy =
+          13 * Math.cos(t) -
+          5 * Math.cos(2 * t) -
+          2 * Math.cos(3 * t) -
+          1 * Math.cos(4 * t);
+
+        // normalize + scale
+        x = (hx / 16) * 4.0 + (Math.random() - 0.5) * 0.15;
+        y = (hy / 17) * 4.0 + (Math.random() - 0.5) * 0.15;
+        z = (Math.random() - 0.5) * 1.2;
+      } else if (particlePattern === "sphere") {
         const theta = Math.random() * Math.PI * 2;
         const phi = Math.acos(2 * Math.random() - 1);
-        const r = 4 * Math.cbrt(Math.random()); // Uniform distribution inside sphere
+        const r = 4 * Math.cbrt(Math.random());
         x = r * Math.sin(phi) * Math.cos(theta);
         y = r * Math.sin(phi) * Math.sin(theta);
         z = r * Math.cos(phi);
@@ -38,7 +58,6 @@ const Particles = () => {
         x = (R + r * Math.cos(v)) * Math.cos(u);
         y = (R + r * Math.cos(v)) * Math.sin(u);
         z = r * Math.sin(v);
-        // Add some noise
         x += (Math.random() - 0.5) * 0.5;
         y += (Math.random() - 0.5) * 0.5;
         z += (Math.random() - 0.5) * 0.5;
@@ -64,7 +83,7 @@ const Particles = () => {
       pos[i * 3 + 2] = z;
     }
     return pos;
-  }, [particlePattern]);
+  }, [particlePattern, effectivePattern]);
 
   const uniforms = useMemo(
     () => ({
@@ -85,8 +104,6 @@ const Particles = () => {
       const material = pointsRef.current.material as THREE.ShaderMaterial;
       material.uniforms.uTime.value = state.clock.getElapsedTime();
 
-      // Smoothly interpolate expansion based on hand openness
-      // Target expansion: 0.2 (closed) to 2.0 (open)
       const targetExpansion = 0.2 + handOpenness * 1.8;
       material.uniforms.uExpansion.value = THREE.MathUtils.lerp(
         material.uniforms.uExpansion.value,
@@ -94,7 +111,6 @@ const Particles = () => {
         0.1,
       );
 
-      // Rotate the whole system slowly
       pointsRef.current.rotation.y += 0.001;
       pointsRef.current.rotation.z += 0.0005;
     }
